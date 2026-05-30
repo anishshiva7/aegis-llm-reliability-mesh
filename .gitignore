@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environment
+backend/venv/
+
+# Local model cache (sentence-transformers / huggingface)
+backend/.hf_cache/
+
+# OS
+.DS_Store
