@@ -125,12 +125,129 @@ class RetrievedContext(BaseModel):
     chunk_index: int
 
 
+# ---------------------------------------------------------------------------
+# Evaluation / Judge (Module 3)
+# ---------------------------------------------------------------------------
+class EvaluationScores(BaseModel):
+    """Raw dimension scores produced by the judge, each in [0.0, 1.0]."""
+
+    relevance: float = Field(..., ge=0.0, le=1.0, description="How relevant the answer is to the query.")
+    groundedness: float = Field(..., ge=0.0, le=1.0, description="Degree to which the answer is grounded in retrieved context.")
+    completeness: float = Field(..., ge=0.0, le=1.0, description="Whether the answer fully addresses the query.")
+    hallucination_risk: float = Field(..., ge=0.0, le=1.0, description="Estimated probability the answer contains fabricated content.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Judge's overall confidence in answer quality.")
+    overall_score: float = Field(..., ge=0.0, le=1.0, description="Weighted composite of all dimensions.")
+
+
+class EvaluationResult(BaseModel):
+    """Full output of the evaluation pass — scores plus retry recommendation."""
+
+    scores: EvaluationScores
+    should_retry: bool = Field(
+        ...,
+        description="True when quality is below acceptable thresholds (handled in Module 4).",
+    )
+    evaluation_reason: str = Field(
+        ..., description="Human-readable explanation of the evaluation outcome."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Adaptive retry / self-healing (Module 4)
+# ---------------------------------------------------------------------------
+class AttemptTrace(BaseModel):
+    """A single attempt in the retry loop — the initial try or one retry."""
+
+    attempt: int = Field(..., ge=1, description="1-based attempt number.")
+    strategy: str = Field(
+        ..., description="Strategy that produced this attempt (e.g. 'initial', 'force_rag')."
+    )
+    route: Route = Field(..., description="Route taken on this attempt.")
+    overall_score: float = Field(..., ge=0.0, le=1.0, description="Evaluation overall score.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Evaluation confidence.")
+    should_retry: bool = Field(..., description="Whether this attempt was itself flagged for retry.")
+
+
+class RetryTrace(BaseModel):
+    """Observability for the self-healing loop — what was tried and what won."""
+
+    attempts: list[AttemptTrace] = Field(
+        ..., description="All attempts in order; index 0 is the initial try."
+    )
+    retry_count: int = Field(..., ge=0, description="Number of retries executed (excludes initial).")
+    selected_best_attempt: int = Field(
+        ..., ge=1, description="1-based attempt number that was returned as the answer."
+    )
+    retry_strategies_used: list[str] = Field(
+        default_factory=list, description="Strategy names attempted, in order."
+    )
+    score_progression: list[float] = Field(
+        default_factory=list, description="overall_score per attempt, in order."
+    )
+    degraded_response: bool = Field(
+        default=False,
+        description="True when the best answer still fails quality thresholds after all retries.",
+    )
+    budget_blocked: bool = Field(
+        default=False,
+        description="True when the cost/rate guardrail (Module 7) halted further "
+        "retries before the budget was exceeded. Implies degraded_response.",
+    )
+
+
+class GenerationTrace(BaseModel):
+    """
+    Per-generation observability (Module 6).
+
+    Captures *which* provider answered and *what it cost*, without leaking any
+    vendor specifics into the pipeline. Token counts and cost are clearly
+    labelled estimates (chars/4 heuristic + coarse per-family pricing) — useful
+    for relative comparison and budget signals, not billing-grade accuracy.
+    """
+
+    provider_name: str = Field(..., description="Provider that produced the answer (e.g. 'bedrock:anthropic.claude-...').")
+    model_name: str = Field(..., description="Model id behind that provider.")
+    provider_latency_ms: float = Field(..., description="Time spent inside the provider call, in ms.")
+    fallback_used: bool = Field(
+        default=False,
+        description="True when the primary provider failed and a fallback answered.",
+    )
+    fallback_chain: list[str] = Field(
+        default_factory=list,
+        description="Configured provider chain, in priority order.",
+    )
+    estimated_input_tokens: int = Field(..., ge=0, description="Prompt tokens — exact when from the provider, else chars/4 estimate.")
+    estimated_output_tokens: int = Field(..., ge=0, description="Completion tokens — exact when from the provider, else chars/4 estimate.")
+    estimated_cost_usd: float = Field(..., ge=0.0, description="USD cost for this generation (estimate when tokens are estimated).")
+    token_usage_source: str = Field(
+        default="estimated",
+        description="Where token counts came from: 'provider' (exact, from the "
+        "vendor response) or 'estimated' (chars/4 heuristic fallback).",
+    )
+
+
 class RouteTrace(BaseModel):
     """Observability payload — how and why the answer was produced."""
 
     route: Route = Field(..., description="The route that was selected.")
     reason: str = Field(..., description="Human-readable explanation of the choice.")
-    retrieval_used: bool = Field(..., description="Whether the vector store was queried.")
+    retrieval_used: bool = Field(
+        ...,
+        description="Whether the vector store was touched at all during this "
+        "request. Retained for backward compatibility; prefer the more precise "
+        "retrieval_probe_used / answer_context_used below.",
+    )
+    retrieval_probe_used: bool = Field(
+        default=False,
+        description="True when the router searched the vector store to *decide* "
+        "the route (a routing probe). May be true even for DIRECT_ANSWER.",
+    )
+    answer_context_used: bool = Field(
+        default=False,
+        description="True when retrieved chunks were actually injected into the "
+        "answer prompt (grounded generation). False for direct/clarification "
+        "answers even if a routing probe ran.",
+    )
     generation_mode: str = Field(
         ..., description="grounded | direct | clarification."
     )
@@ -141,6 +258,26 @@ class RouteTrace(BaseModel):
     retrieved: list[RetrievedContext] = Field(
         default_factory=list, description="Chunks retrieved for grounding."
     )
+    evaluation: Optional[EvaluationResult] = Field(
+        default=None, description="LLM-as-a-Judge quality evaluation (Module 3+)."
+    )
+    retry: Optional[RetryTrace] = Field(
+        default=None,
+        description="Self-healing retry trace (Module 4); present whenever the "
+        "loop engaged (evaluation flagged should_retry). retry_count may be 0 if "
+        "no strategy was applicable, in which case degraded_response is set.",
+    )
+    generation_error: Optional[str] = Field(
+        default=None,
+        description="Set when the LLM provider failed and a degraded answer was "
+        "returned (Module 5). None on the normal path.",
+    )
+    generation: Optional[GenerationTrace] = Field(
+        default=None,
+        description="Provider/cost observability for the winning attempt (Module 6). "
+        "Absent on pure-clarification routes or when the generator predates the "
+        "metadata interface.",
+    )
 
 
 class AskResponse(BaseModel):
@@ -150,3 +287,32 @@ class AskResponse(BaseModel):
     route: Route
     answer: str
     trace: Optional[RouteTrace] = None
+
+
+# ---------------------------------------------------------------------------
+# Provider health (Module 7)
+# ---------------------------------------------------------------------------
+class ProviderHealth(BaseModel):
+    """Rolling health snapshot for a single provider."""
+
+    provider: str
+    health_status: str = Field(..., description="healthy | degraded | unhealthy.")
+    consecutive_failures: int = Field(..., ge=0)
+    total_successes: int = Field(..., ge=0)
+    total_failures: int = Field(..., ge=0)
+    last_success_at: Optional[float] = Field(
+        default=None, description="Unix timestamp of the last success, if any."
+    )
+    last_failure_at: Optional[float] = Field(
+        default=None, description="Unix timestamp of the last failure, if any."
+    )
+
+
+class ProvidersHealthResponse(BaseModel):
+    """All known providers' health, plus the health-aware fallback order."""
+
+    providers: list[ProviderHealth]
+    recommended_order: list[str] = Field(
+        default_factory=list,
+        description="Provider names sorted healthiest-first (mock kept last).",
+    )

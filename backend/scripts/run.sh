@@ -22,6 +22,7 @@ export HF_HOME="${HF_HOME:-$BACKEND_DIR/.hf_cache}"
 PORT="${PORT:-8000}"
 
 echo "Using model cache: $HF_HOME"
+echo "LLM provider: ${AEGIS_PROVIDER:-mock} (fallback: ${AEGIS_FALLBACK_PROVIDER:-mock})"
 echo "Starting Aegis retrieval API on http://127.0.0.1:$PORT (docs at /docs)"
 
 exec ./venv/bin/uvicorn app.main:app --reload --port "$PORT"

@@ -1,0 +1,11 @@
+# Optional LLM provider SDKs (Module 5).
+# Install only the provider(s) you intend to use; the default `mock` provider
+# and the full test suite require none of these.
+#
+#   pip install -r requirements-providers.txt   # all
+#   pip install openai                           # OpenAI only
+#   pip install anthropic                        # Anthropic only
+#   pip install boto3                            # AWS Bedrock only
+openai>=1.40.0
+anthropic>=0.34.0
+boto3>=1.34.0

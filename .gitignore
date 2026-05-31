@@ -9,5 +9,9 @@ backend/venv/
 # Local model cache (sentence-transformers / huggingface)
 backend/.hf_cache/
 
+# Generated SQLite metrics store (Module 7) — recreated on first /ask
+backend/aegis_metrics.db
+backend/*.db
+
 # OS
 .DS_Store
