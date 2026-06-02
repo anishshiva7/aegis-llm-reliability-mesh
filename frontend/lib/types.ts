@@ -109,6 +109,19 @@ export interface GraphTrace {
   graph_latency_ms: number;
 }
 
+// Module 10 — standalone /graph/search endpoint (graph retrieval in isolation).
+export interface GraphSearchRequest {
+  query: string;
+  max_hops?: number | null;
+  chunk_limit?: number | null;
+}
+
+export interface GraphSearchResponse {
+  query: string;
+  graph_used: boolean;
+  graph: GraphTrace;
+}
+
 export interface RouteTrace {
   route: Route;
   reason: string;

@@ -281,6 +281,39 @@ class GraphTrace(BaseModel):
     graph_latency_ms: float = Field(default=0.0, description="Time spent in graph retrieval, in ms.")
 
 
+class GraphSearchRequest(BaseModel):
+    """Body for the standalone /graph/search endpoint (Module 10).
+
+    Lets you inspect knowledge-graph retrieval in isolation — no LLM call, no
+    vector store — to see exactly which entities/relationships a query anchors.
+    """
+
+    query: str = Field(..., min_length=1, description="Natural-language query.")
+    max_hops: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=5,
+        description="Traversal depth. Defaults to server config (graph_max_hops).",
+    )
+    chunk_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Max document chunks to link back. Defaults to server config.",
+    )
+
+
+class GraphSearchResponse(BaseModel):
+    """Result of a direct graph traversal — the GraphTrace, plus convenience flags."""
+
+    query: str
+    graph_used: bool = Field(
+        ...,
+        description="True when the query matched at least one entity and the graph "
+        "had relevant structure to traverse.",
+    )
+    graph: GraphTrace = Field(..., description="Full graph-retrieval observability payload.")
+
+
 class RouteTrace(BaseModel):
     """Observability payload — how and why the answer was produced."""
 

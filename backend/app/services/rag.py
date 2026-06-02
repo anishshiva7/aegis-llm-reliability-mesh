@@ -178,6 +178,52 @@ def _generation_failure_message(error: str) -> str:
     )
 
 
+def build_graph_trace(
+    graph_result: Optional[GraphSearchResult],
+    backend: str = "memory",
+    latency_ms: float = 0.0,
+) -> Optional[GraphTrace]:
+    """Map an internal GraphSearchResult onto the public GraphTrace (Module 10).
+
+    Module-level so both the RAGPipeline (hybrid /ask) and the standalone
+    /graph/search endpoint can share one mapping and never drift apart.
+    """
+    if graph_result is None:
+        return None
+    return GraphTrace(
+        graph_backend=backend,
+        matched_entities=[
+            GraphEntityModel(
+                name=e.name, category=e.category.value, description=e.description
+            )
+            for e in graph_result.matched_entities
+        ],
+        traversed_entities=[
+            GraphEntityModel(
+                name=e.name, category=e.category.value, description=e.description
+            )
+            for e in graph_result.traversed_entities
+        ],
+        traversed_relationships=[
+            GraphRelationshipModel(source=r.source, type=r.type, target=r.target)
+            for r in graph_result.traversed_relationships
+        ],
+        graph_chunks=[
+            RetrievedContext(
+                chunk_id=-1,
+                text=ch.text,
+                score=graph_result.graph_score,
+                source=ch.source,
+                chunk_index=ch.chunk_index,
+            )
+            for ch in graph_result.graph_chunks
+        ],
+        graph_score=graph_result.graph_score,
+        hops=graph_result.hops,
+        graph_latency_ms=round(latency_ms, 2),
+    )
+
+
 class RAGPipeline:
     def __init__(
         self,
@@ -510,38 +556,7 @@ class RAGPipeline:
             if self.graph_retriever is not None
             else 0.0
         )
-        return GraphTrace(
-            graph_backend=backend,
-            matched_entities=[
-                GraphEntityModel(
-                    name=e.name, category=e.category.value, description=e.description
-                )
-                for e in graph_result.matched_entities
-            ],
-            traversed_entities=[
-                GraphEntityModel(
-                    name=e.name, category=e.category.value, description=e.description
-                )
-                for e in graph_result.traversed_entities
-            ],
-            traversed_relationships=[
-                GraphRelationshipModel(source=r.source, type=r.type, target=r.target)
-                for r in graph_result.traversed_relationships
-            ],
-            graph_chunks=[
-                RetrievedContext(
-                    chunk_id=-1,
-                    text=ch.text,
-                    score=graph_result.graph_score,
-                    source=ch.source,
-                    chunk_index=ch.chunk_index,
-                )
-                for ch in graph_result.graph_chunks
-            ],
-            graph_score=graph_result.graph_score,
-            hops=graph_result.hops,
-            graph_latency_ms=round(latency, 2),
-        )
+        return build_graph_trace(graph_result, backend=backend, latency_ms=latency)
 
     def _forced_decision(self, query, force_route: Route, top_k) -> RouteDecision:
         """Build a RouteDecision for a caller-forced route (skips heuristics)."""

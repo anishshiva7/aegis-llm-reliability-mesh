@@ -4,6 +4,8 @@
 import type {
   AskRequest,
   AskResponse,
+  GraphSearchRequest,
+  GraphSearchResponse,
   IngestRequest,
   IngestResponse,
   MetricsSnapshot,
@@ -73,6 +75,16 @@ export function ask(payload: AskRequest): Promise<AskResponse> {
 
 export function ingest(payload: IngestRequest): Promise<IngestResponse> {
   return request<IngestResponse>("/ingest", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** Module 10 — inspect knowledge-graph retrieval in isolation (no LLM, no FAISS). */
+export function graphSearch(
+  payload: GraphSearchRequest,
+): Promise<GraphSearchResponse> {
+  return request<GraphSearchResponse>("/graph/search", {
     method: "POST",
     body: JSON.stringify(payload),
   });

@@ -285,6 +285,42 @@ because this was a relationship-heavy query. It combined FAISS vector search wit
 neo4j graph traversal across 6 entities and 9 relationships before generating the
 answer."*
 
+### Inspecting the graph directly — `POST /graph/search`
+
+To see what the knowledge graph contributes **in isolation** (no LLM call, no
+FAISS vector search), hit the standalone graph-search endpoint. It runs the same
+traversal a hybrid `/ask` uses and returns just the `GraphTrace`:
+
+```bash
+curl -s http://127.0.0.1:8000/graph/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How do routing and retries interact?"}' | jq
+```
+
+```jsonc
+{
+  "query": "How do routing and retries interact?",
+  "graph_used": true,
+  "graph": {
+    "graph_backend": "memory",            // or "neo4j" on the Neo4j path
+    "matched_entities": [
+      { "name": "QueryRouter",  "category": "Component", "description": "..." },
+      { "name": "RetryManager", "category": "Retry",     "description": "..." }
+    ],
+    "traversed_entities": [ /* 19 nodes reached within 2 hops */ ],
+    "traversed_relationships": [ /* 23 edges */ ],
+    "graph_chunks": [ /* chunks linked to matched entities (after /ingest) */ ],
+    "graph_score": 0.88,
+    "hops": 2,
+    "graph_latency_ms": 0.1
+  }
+}
+```
+
+Optional body fields: `max_hops` (1–5, overrides the configured depth) and
+`chunk_limit` (max linked chunks). A query that matches no ontology entity
+returns `graph_used: false` with an empty trace.
+
 ### Running with Neo4j (optional)
 
 ```bash
@@ -334,11 +370,12 @@ make test           # runs every backend suite with the offline mock provider
 make build          # production build of the dashboard (verifies it compiles)
 ```
 
-The backend ships **16 standalone test suites** (routing, RAG, judge, retry,
+The backend ships **17 standalone test suites** (routing, RAG, judge, retry,
 provider fallback, Bedrock/cost/metrics, ops, frontend contract, trace
-semantics, the semantic mock, and five Module 10 GraphRAG suites — graph store,
-Neo4j integration + fallback, graph retrieval, hybrid RAG, and the dashboard
-contract). The GraphRAG suites run entirely offline against the in-memory graph
+semantics, the semantic mock, and six Module 10 GraphRAG suites — graph store,
+Neo4j integration + fallback, graph retrieval, the `/graph/search` endpoint,
+hybrid RAG, and the dashboard contract). The GraphRAG suites run entirely
+offline against the in-memory graph
 store; the Neo4j suite exercises a live round-trip only if one is reachable and
 skips otherwise. Each runs offline with no API keys and can also be executed
 directly:
@@ -376,6 +413,6 @@ aegis-llm-reliability-mesh/
 │   ├── app/               # routers, services, schemas, config
 │   │   └── services/graph/  # GraphStore, Neo4j + in-memory backends, retriever
 │   ├── scripts/           # run.sh, seed.sh, *_examples.sh
-│   └── tests/             # 16 offline test suites (incl. 5 GraphRAG)
+│   └── tests/             # 17 offline test suites (incl. 6 GraphRAG)
 └── frontend/              # Next.js 14 observability dashboard
 ```

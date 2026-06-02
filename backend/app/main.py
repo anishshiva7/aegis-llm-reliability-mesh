@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .dependencies import get_engine, get_graph_store
 from .logging_config import configure_logging, get_logger
 from .models.schemas import StatsResponse
-from .routers import ask, health as providers_health, ingest, metrics, search
+from .routers import ask, graph, health as providers_health, ingest, metrics, search
 from .services.retrieval import RetrievalEngine
 
 configure_logging()
@@ -43,6 +43,7 @@ app.add_middleware(
 app.include_router(ingest.router)
 app.include_router(search.router)
 app.include_router(ask.router)
+app.include_router(graph.router)
 app.include_router(metrics.router)
 app.include_router(providers_health.router)
 
