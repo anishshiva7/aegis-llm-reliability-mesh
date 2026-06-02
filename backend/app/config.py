@@ -26,6 +26,15 @@ def _env_float(key: str, default: float) -> float:
     return float(raw) if raw is not None else default
 
 
+def _env_raw(key: str, default: str) -> str:
+    """Read an unprefixed env var (e.g. NEO4J_URI), falling back to AEGIS_<key>.
+
+    Neo4j tooling conventionally uses bare ``NEO4J_*`` names, so we honour those
+    first while still allowing the ``AEGIS_``-prefixed override for consistency.
+    """
+    return os.environ.get(key) or os.environ.get(f"AEGIS_{key}", default)
+
+
 @dataclass(frozen=True)
 class Settings:
     # ---- Embedding model -------------------------------------------------
@@ -117,6 +126,20 @@ class Settings:
     max_daily_cost_usd: float = 0.0
     max_retries_on_cost_limit: int = 0
 
+    # ---- GraphRAG / Knowledge graph (Module 10) --------------------------
+    # graph_backend     — neo4j | memory. "neo4j" tries a real Neo4j instance
+    #                     and gracefully falls back to the in-memory store if it
+    #                     is unreachable; "memory" (default) is fully offline.
+    # NEO4J_* credentials are used only when graph_backend == "neo4j". The bolt
+    # URI/user/password follow Neo4j conventions; the password is never logged.
+    graph_backend: str = "memory"
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_username: str = "neo4j"
+    neo4j_password: str = "neo4j"
+    neo4j_database: str = "neo4j"
+    # Default multi-hop traversal depth for graph retrieval (1–3 is sensible).
+    graph_max_hops: int = 2
+
     # ---- Logging ---------------------------------------------------------
     log_level: str = "INFO"
 
@@ -152,6 +175,12 @@ def get_settings() -> Settings:
         max_request_cost_usd=_env_float("MAX_REQUEST_COST_USD", 0.0),
         max_daily_cost_usd=_env_float("MAX_DAILY_COST_USD", 0.0),
         max_retries_on_cost_limit=_env_int("MAX_RETRIES_ON_COST_LIMIT", 0),
+        graph_backend=_env_str("GRAPH_BACKEND", "memory"),
+        neo4j_uri=_env_raw("NEO4J_URI", "bolt://localhost:7687"),
+        neo4j_username=_env_raw("NEO4J_USERNAME", "neo4j"),
+        neo4j_password=_env_raw("NEO4J_PASSWORD", "neo4j"),
+        neo4j_database=_env_raw("NEO4J_DATABASE", "neo4j"),
+        graph_max_hops=_env_int("GRAPH_MAX_HOPS", 2),
         log_level=_env_str("LOG_LEVEL", "INFO"),
     )
     # Guard against a footgun: overlap >= chunk_size would never advance the

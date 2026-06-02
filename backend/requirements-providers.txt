@@ -9,3 +9,9 @@
 openai>=1.40.0
 anthropic>=0.34.0
 boto3>=1.34.0
+
+# Optional knowledge-graph backend (Module 10 — GraphRAG).
+# The driver is lazy-imported: Aegis runs the in-memory graph store by default
+# and only needs this when AEGIS_GRAPH_BACKEND=neo4j points at a live server.
+#   pip install neo4j
+neo4j>=5.20.0

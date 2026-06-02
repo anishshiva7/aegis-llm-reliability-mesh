@@ -16,6 +16,13 @@ from .config import Settings, get_settings
 from .logging_config import get_logger
 from .services.budget import get_budget_guard
 from .services.generator import LLMClient
+from .services.graph import (
+    GraphRetriever,
+    GraphStore,
+    KnowledgeGraphBuilder,
+    build_graph_store,
+    get_graph_metrics,
+)
 from .services.health import get_health_registry
 from .services.metrics import get_metrics
 from .services.metrics_store import get_metrics_store
@@ -35,6 +42,9 @@ logger = get_logger(__name__)
 
 _engine: Optional[RetrievalEngine] = None
 _pipeline: Optional[RAGPipeline] = None
+_graph_store: Optional[GraphStore] = None
+_graph_builder: Optional[KnowledgeGraphBuilder] = None
+_graph_retriever: Optional[GraphRetriever] = None
 
 
 def get_engine() -> RetrievalEngine:
@@ -44,6 +54,46 @@ def get_engine() -> RetrievalEngine:
         logger.info("Constructing global RetrievalEngine (first request).")
         _engine = RetrievalEngine()
     return _engine
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph (Module 10)
+# ---------------------------------------------------------------------------
+def get_graph_store() -> GraphStore:
+    """Return the process-wide GraphStore, seeding Aegis's architecture once.
+
+    Backend is chosen by config (AEGIS_GRAPH_BACKEND): a real Neo4j when
+    reachable, otherwise the offline in-memory store. Either way the seed
+    ontology is loaded so relationship/architecture questions work immediately.
+    """
+    global _graph_store, _graph_builder
+    if _graph_store is None:
+        logger.info("Constructing global GraphStore (first request).")
+        _graph_store = build_graph_store()
+        _graph_builder = KnowledgeGraphBuilder(_graph_store)
+        _graph_builder.seed()
+        # Prime the graph-size gauges for the metrics snapshot.
+        get_graph_metrics().record_store_stats(_graph_store.stats())
+    return _graph_store
+
+
+def get_graph_builder() -> KnowledgeGraphBuilder:
+    """Return the builder used to enrich the graph during ingestion."""
+    global _graph_builder
+    if _graph_builder is None:
+        get_graph_store()  # constructs the builder as a side effect
+    return _graph_builder
+
+
+def get_graph_retriever() -> GraphRetriever:
+    """Return the process-wide GraphRetriever over the shared GraphStore."""
+    global _graph_retriever
+    if _graph_retriever is None:
+        store = get_graph_store()
+        _graph_retriever = GraphRetriever(
+            store, max_hops=get_settings().graph_max_hops
+        )
+    return _graph_retriever
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +186,16 @@ def get_pipeline() -> RAGPipeline:
         _pipeline = RAGPipeline(
             engine=get_engine(),
             generator=build_generator(settings),
-            router=QueryRouter(),
+            # graph_available=True lets the router activate hybrid retrieval for
+            # architecture/relationship queries (Module 10).
+            router=QueryRouter(graph_available=True),
             # Self-healing loop governed by the cost guardrail (Module 7).
             retry_manager=RetryManager(settings, budget_guard=get_budget_guard()),
             metrics=get_metrics(),
             metrics_store=get_metrics_store(),
             budget_guard=get_budget_guard(),
+            # Hybrid GraphRAG retrieval + telemetry (Module 10).
+            graph_retriever=get_graph_retriever(),
+            graph_metrics=get_graph_metrics(),
         )
     return _pipeline

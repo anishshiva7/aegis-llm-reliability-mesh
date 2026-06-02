@@ -8,6 +8,7 @@ import { IngestPanel } from "./IngestPanel";
 import { WhatHappened } from "./WhatHappened";
 import { AnswerPanel } from "./AnswerPanel";
 import { RetrievalPanel } from "./RetrievalPanel";
+import { GraphTracePanel } from "./GraphTracePanel";
 import { EvaluationPanel } from "./EvaluationPanel";
 import { RetryTimeline } from "./RetryTimeline";
 import { GenerationPanel } from "./GenerationPanel";
@@ -20,7 +21,8 @@ const ROUTES: { value: "" | Route; label: string }[] = [
 ];
 
 const SAMPLES = [
-  "What is Aegis and how does its reliability mesh work?",
+  "How do routing and retries interact?",
+  "Trace the path of a RAG request end-to-end.",
   "How does the self-healing retry loop decide to retry?",
   "Summarize the provider fallback strategy.",
 ];
@@ -166,6 +168,9 @@ export function QueryConsole() {
               <EvaluationPanel evaluation={trace.evaluation} />
             )}
           </div>
+
+          {/* Self-hides for vector/direct queries — only renders on graph/hybrid */}
+          {trace && <GraphTracePanel trace={trace} />}
 
           <div className="grid gap-6 lg:grid-cols-2">
             {trace?.retry && <RetryTimeline retry={trace.retry} />}

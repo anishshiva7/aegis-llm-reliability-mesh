@@ -268,6 +268,38 @@ export function MetricsDashboard() {
         </Panel>
       </div>
 
+      {/* GraphRAG telemetry (Module 10) */}
+      {metrics.graph && (
+        <Panel
+          title="GraphRAG / Hybrid Retrieval"
+          subtitle="Knowledge-graph traversal telemetry (Module 10)"
+          right={
+            <Badge tone={metrics.graph.hybrid_queries > 0 ? "accent" : "neutral"}>
+              {metrics.graph.hybrid_queries} hybrid quer
+              {metrics.graph.hybrid_queries === 1 ? "y" : "ies"}
+            </Badge>
+          }
+        >
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+            <Stat label="Graph nodes" value={metrics.graph.graph_nodes} />
+            <Stat
+              label="Relationships"
+              value={metrics.graph.graph_relationships}
+            />
+            <Stat label="Linked chunks" value={metrics.graph.linked_chunks} />
+            <Stat label="Traversals" value={metrics.graph.graph_traversals} />
+            <Stat
+              label="Hybrid queries"
+              value={metrics.graph.hybrid_queries}
+            />
+            <Stat
+              label="Avg graph latency"
+              value={ms(metrics.graph.graph_latency_ms)}
+            />
+          </div>
+        </Panel>
+      )}
+
       {/* Prometheus exposition */}
       <Panel
         title="Prometheus exposition"

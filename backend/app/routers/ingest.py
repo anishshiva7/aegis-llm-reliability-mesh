@@ -12,14 +12,40 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from ..dependencies import get_engine
+from ..dependencies import get_engine, get_graph_builder
 from ..logging_config import get_logger
 from ..models.schemas import IngestResponse, IngestTextRequest
+from ..services.graph import get_graph_metrics
 from ..services.retrieval import RetrievalEngine
 
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["ingest"])
+
+
+def _enrich_graph(
+    text: str,
+    source: str,
+    chunk_size: Optional[int],
+    chunk_overlap: Optional[int],
+) -> None:
+    """Mirror the FAISS ingest into the knowledge graph (Module 10).
+
+    Best-effort: a graph failure must never break document ingestion, so any
+    error here is logged and swallowed. The vector path has already succeeded.
+    """
+    try:
+        builder = get_graph_builder()
+        builder.ingest_document(
+            text=text,
+            source=source,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        # Refresh the graph-size gauges exposed via /metrics.
+        get_graph_metrics().record_store_stats(builder.store.stats())
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Graph enrichment failed for source=%r: %s", source, exc)
 
 
 @router.post("/ingest", response_model=IngestResponse)
@@ -38,6 +64,7 @@ def ingest_text(
         chunk_size=request.chunk_size,
         chunk_overlap=request.chunk_overlap,
     )
+    _enrich_graph(request.text, source, request.chunk_size, request.chunk_overlap)
     return IngestResponse(
         source=source,
         chunks_created=chunks_created,
@@ -77,6 +104,7 @@ async def ingest_file(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
+    _enrich_graph(text, source, chunk_size, chunk_overlap)
     return IngestResponse(
         source=source,
         chunks_created=chunks_created,

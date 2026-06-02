@@ -63,6 +63,9 @@ class AttemptResult:
     # Provider/cost observability for this attempt (Module 6). None for routes
     # that never call the generator (e.g. clarification) or legacy generators.
     generation: Optional[GenerationTrace] = None
+    # Knowledge-graph retrieval result for this attempt (Module 10, hybrid mode).
+    # Typed loosely (GraphSearchResult) to keep retry.py free of graph imports.
+    graph_result: Optional[object] = None
 
     @property
     def score(self) -> float:

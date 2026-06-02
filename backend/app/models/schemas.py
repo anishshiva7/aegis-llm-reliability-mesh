@@ -226,6 +226,61 @@ class GenerationTrace(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# GraphRAG / hybrid retrieval (Module 10)
+# ---------------------------------------------------------------------------
+class RetrievalMode(str, Enum):
+    """How context was gathered for this request."""
+
+    VECTOR = "vector"  # FAISS semantic similarity only
+    GRAPH = "graph"    # knowledge-graph traversal only
+    HYBRID = "hybrid"  # FAISS + graph fused
+
+
+class GraphEntityModel(BaseModel):
+    """A single knowledge-graph entity surfaced in the trace."""
+
+    name: str = Field(..., description="Canonical entity name (the MERGE key).")
+    category: str = Field(..., description="Entity category, e.g. Component, Route, Provider.")
+    description: str = Field(default="", description="Short human-readable description.")
+
+
+class GraphRelationshipModel(BaseModel):
+    """A directed, typed edge between two entities: (source)-[type]->(target)."""
+
+    source: str
+    type: str
+    target: str
+
+
+class GraphTrace(BaseModel):
+    """Graph-retrieval observability — what the knowledge graph contributed."""
+
+    graph_backend: str = Field(..., description="Backend that served the graph: neo4j | memory.")
+    matched_entities: list[GraphEntityModel] = Field(
+        default_factory=list,
+        description="Entities the query referred to that anchor the traversal.",
+    )
+    traversed_entities: list[GraphEntityModel] = Field(
+        default_factory=list,
+        description="Entities reached within the hop budget (includes the anchors).",
+    )
+    traversed_relationships: list[GraphRelationshipModel] = Field(
+        default_factory=list,
+        description="Edges connecting the traversed neighbourhood.",
+    )
+    graph_chunks: list[RetrievedContext] = Field(
+        default_factory=list,
+        description="Document chunks linked to the matched entities.",
+    )
+    graph_score: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="0..1 confidence the graph had relevant structure to offer.",
+    )
+    hops: int = Field(default=0, ge=0, description="Traversal depth used.")
+    graph_latency_ms: float = Field(default=0.0, description="Time spent in graph retrieval, in ms.")
+
+
 class RouteTrace(BaseModel):
     """Observability payload — how and why the answer was produced."""
 
@@ -250,6 +305,15 @@ class RouteTrace(BaseModel):
     )
     generation_mode: str = Field(
         ..., description="grounded | direct | clarification."
+    )
+    retrieval_mode: RetrievalMode = Field(
+        default=RetrievalMode.VECTOR,
+        description="How context was gathered: vector | graph | hybrid (Module 10).",
+    )
+    graph_used: bool = Field(
+        default=False,
+        description="True when the knowledge graph contributed entities or chunks "
+        "to this answer (Module 10).",
     )
     latency_ms: float = Field(..., description="End-to-end handling time in ms.")
     top_score: Optional[float] = Field(
@@ -277,6 +341,11 @@ class RouteTrace(BaseModel):
         description="Provider/cost observability for the winning attempt (Module 6). "
         "Absent on pure-clarification routes or when the generator predates the "
         "metadata interface.",
+    )
+    graph: Optional[GraphTrace] = Field(
+        default=None,
+        description="Knowledge-graph retrieval trace (Module 10). Present when "
+        "retrieval_mode is graph or hybrid.",
     )
 
 

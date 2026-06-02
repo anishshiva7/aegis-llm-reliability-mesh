@@ -61,6 +61,19 @@ _DOC_INTENT_KEYWORDS = (
     "according to", "in the text", "the paper", "the article", "ingested",
     "knowledge base", "the report",
 )
+# Signals the query is about *system structure* — relationships, dependencies,
+# data/control flow, component interactions. These benefit from graph traversal,
+# so when a knowledge graph is available we answer them with HYBRID retrieval
+# (FAISS vector context + Neo4j graph context). See Module 10, Part F.
+_ARCHITECTURE_KEYWORDS = (
+    "relationship", "relationships", "related", "depend", "dependency",
+    "dependencies", "architecture", "architectural", "workflow", "work flow",
+    "trace", "interact", "interaction", "interacts", "connect", "connects",
+    "connected", "pipeline", "end-to-end", "end to end", "failure path",
+    "data flow", "control flow", "flow through", "component", "components",
+    "how does", "how do", "what happens when", "wired", "fits together",
+    "downstream", "upstream", "fail over", "failover", "fall back", "fallback",
+)
 
 
 @dataclass
@@ -72,16 +85,31 @@ class RouteDecision:
     retrieval_used: bool = False
     top_score: Optional[float] = None
     hits: List[Hit] = field(default_factory=list)
+    # How context should be gathered for this query (Module 10).
+    #   vector — FAISS only (the historical default)
+    #   hybrid — FAISS + knowledge-graph traversal (architecture queries)
+    retrieval_mode: str = "vector"
 
 
 class QueryRouter:
     def __init__(
         self,
         classifier: Optional[Callable[[str], Optional[Route]]] = None,
+        graph_available: bool = False,
     ) -> None:
         # Optional LLM-backed classifier hook. If it returns a Route, we trust
         # it; if it returns None (or isn't provided), we fall back to heuristics.
         self._classifier = classifier
+        # Whether a knowledge graph is wired in. When False (the default, used by
+        # unit tests that build a bare router), routing behaves exactly as before
+        # Module 10 — no hybrid activation, so existing behaviour is preserved.
+        self._graph_available = graph_available
+
+    @staticmethod
+    def is_architecture_query(query: str) -> bool:
+        """True when the query is about system structure/relationships/flow."""
+        lowered = query.lower()
+        return any(kw in lowered for kw in _ARCHITECTURE_KEYWORDS)
 
     def route(
         self,
@@ -122,6 +150,26 @@ class QueryRouter:
             return RouteDecision(
                 Route.NEEDS_CLARIFICATION,
                 f"Query is too short ({len(words)} word(s)) to answer confidently.",
+            )
+
+        # --- 1.5 Architecture / relationship intent → HYBRID (Module 10) ---
+        # When a knowledge graph is available and the query is about how the
+        # system is wired (relationships, dependencies, flow, component
+        # interaction), prefer hybrid retrieval. The seed graph always has the
+        # architecture, so these are answerable even with an empty vector index;
+        # any indexed documents add vector context on top.
+        if self._graph_available and self.is_architecture_query(lowered):
+            hits = engine.search(normalized, top_k=top_k) if engine.total_chunks else []
+            top = hits[0][1] if hits else None
+            logger.info("Architecture query → HYBRID retrieval (vector hits=%d)", len(hits))
+            return RouteDecision(
+                Route.RAG_ANSWER,
+                "Relationship/architecture query — using hybrid retrieval "
+                "(FAISS vector context + knowledge-graph traversal).",
+                retrieval_used=bool(hits),
+                top_score=top,
+                hits=hits,
+                retrieval_mode="hybrid",
             )
 
         # --- 2. Optional LLM classifier seam ------------------------------

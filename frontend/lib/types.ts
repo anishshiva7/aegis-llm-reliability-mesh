@@ -81,6 +81,34 @@ export interface GenerationTrace {
   token_usage_source: "provider" | "estimated";
 }
 
+// ---------------------------------------------------------------------------
+// GraphRAG / hybrid retrieval (Module 10)
+// ---------------------------------------------------------------------------
+export type RetrievalMode = "vector" | "graph" | "hybrid";
+
+export interface GraphEntity {
+  name: string;
+  category: string;
+  description: string;
+}
+
+export interface GraphRelationship {
+  source: string;
+  type: string;
+  target: string;
+}
+
+export interface GraphTrace {
+  graph_backend: string;
+  matched_entities: GraphEntity[];
+  traversed_entities: GraphEntity[];
+  traversed_relationships: GraphRelationship[];
+  graph_chunks: RetrievedContext[];
+  graph_score: number;
+  hops: number;
+  graph_latency_ms: number;
+}
+
 export interface RouteTrace {
   route: Route;
   reason: string;
@@ -91,6 +119,9 @@ export interface RouteTrace {
   retrieval_probe_used?: boolean;
   answer_context_used?: boolean;
   generation_mode: string;
+  // Module 10 — how context was gathered + the knowledge-graph trace.
+  retrieval_mode?: RetrievalMode;
+  graph_used?: boolean;
   latency_ms: number;
   top_score?: number | null;
   retrieved: RetrievedContext[];
@@ -98,6 +129,7 @@ export interface RouteTrace {
   retry?: RetryTrace | null;
   generation_error?: string | null;
   generation?: GenerationTrace | null;
+  graph?: GraphTrace | null;
 }
 
 export interface AskResponse {
@@ -128,6 +160,17 @@ export interface MetricsSnapshot {
   degraded_response_rate: number;
   cost_total: number;
   estimated_cost_usd_total: number;
+  // Module 10 — knowledge-graph / hybrid retrieval telemetry.
+  graph?: GraphMetrics;
+}
+
+export interface GraphMetrics {
+  graph_nodes: number;
+  graph_relationships: number;
+  linked_chunks: number;
+  graph_traversals: number;
+  hybrid_queries: number;
+  graph_latency_ms: number;
 }
 
 // ---------------------------------------------------------------------------

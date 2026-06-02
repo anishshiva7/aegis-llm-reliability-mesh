@@ -28,6 +28,10 @@ from ..logging_config import get_logger
 from ..models.schemas import (
     AskResponse,
     GenerationTrace,
+    GraphEntityModel,
+    GraphRelationshipModel,
+    GraphTrace,
+    RetrievalMode,
     RetrievedContext,
     Route,
     RouteTrace,
@@ -35,6 +39,9 @@ from ..models.schemas import (
 from .budget import BudgetGuard
 from .evaluator import AnswerEvaluator
 from .generator import LLMClient
+from .graph.graph_metrics import GraphMetrics
+from .graph.graph_retriever import GraphRetriever
+from .graph.models import GraphSearchResult
 from .metrics import MetricsCollector, RequestMetric
 from .metrics_store import MetricsStore
 from .providers.base import ProviderError
@@ -85,6 +92,69 @@ def build_grounded_prompt(query: str, contexts: List[RetrievedContext]) -> str:
     return "\n".join(lines)
 
 
+def build_hybrid_prompt(
+    query: str,
+    contexts: List[RetrievedContext],
+    graph: GraphSearchResult,
+) -> str:
+    """
+    Construct a hybrid prompt fusing vector + graph context (Module 10, Part G).
+
+    Layout (the generator still keys off 'CONTEXT:' for grounding):
+
+        CONTEXT:
+        VECTOR CONTEXT:
+        [1] (source=..#i, score=..) passage text
+        ...
+        GRAPH CONTEXT:
+        Entities: A (Category), B (Category), ...
+        Relationships:
+        (A) -[REL]-> (B)
+        ...
+        Linked Chunks:
+        - (source=..#i) passage text
+        ...
+
+        QUESTION: <query>
+        ANSWER:
+
+    The graph block makes *structural* facts (who connects to whom) explicit, so
+    the model can answer relationship/architecture questions a pure vector
+    retrieval would miss.
+    """
+    lines = ["CONTEXT:", "VECTOR CONTEXT:"]
+    if contexts:
+        for i, ctx in enumerate(contexts, start=1):
+            lines.append(
+                f"[{i}] (source={ctx.source}#{ctx.chunk_index}, "
+                f"score={ctx.score:.3f}) {ctx.text}"
+            )
+    else:
+        lines.append("(no vector matches)")
+
+    lines.append("")
+    lines.append("GRAPH CONTEXT:")
+    entities = graph.traversed_entities or graph.matched_entities
+    if entities:
+        ent_str = ", ".join(f"{e.name} ({e.category.value})" for e in entities)
+        lines.append(f"Entities: {ent_str}")
+    if graph.traversed_relationships:
+        lines.append("Relationships:")
+        for r in graph.traversed_relationships:
+            lines.append(f"({r.source}) -[{r.type}]-> ({r.target})")
+    if graph.graph_chunks:
+        lines.append("Linked Chunks:")
+        for ch in graph.graph_chunks:
+            lines.append(f"- (source={ch.source}#{ch.chunk_index}) {ch.text}")
+    if not entities and not graph.graph_chunks:
+        lines.append("(no graph matches)")
+
+    lines.append("")
+    lines.append(f"QUESTION: {query}")
+    lines.append("ANSWER:")
+    return "\n".join(lines)
+
+
 def build_direct_prompt(query: str) -> str:
     """A minimal prompt with no retrieved context."""
     return f"QUESTION: {query}\nANSWER:"
@@ -119,6 +189,8 @@ class RAGPipeline:
         metrics: Optional[MetricsCollector] = None,
         metrics_store: Optional[MetricsStore] = None,
         budget_guard: Optional[BudgetGuard] = None,
+        graph_retriever: Optional[GraphRetriever] = None,
+        graph_metrics: Optional[GraphMetrics] = None,
     ) -> None:
         self.engine = engine
         self.generator = generator
@@ -130,6 +202,11 @@ class RAGPipeline:
         self.metrics = metrics            # in-memory collector (Module 6)
         self.metrics_store = metrics_store  # persistent SQLite store (Module 7)
         self.budget_guard = budget_guard    # daily-cost accumulator (Module 7)
+        # Knowledge-graph retrieval (Module 10). When None, the pipeline behaves
+        # exactly as before — no hybrid work happens — so existing unit tests
+        # that construct a bare pipeline are completely unaffected.
+        self.graph_retriever = graph_retriever
+        self.graph_metrics = graph_metrics
         self.settings = get_settings()
         logger.info("RAGPipeline ready (generator=%s).", generator.name)
 
@@ -190,8 +267,12 @@ class RAGPipeline:
             #     answer prompt. True only on the grounded RAG path with chunks.
             retrieval_probe_used = best.decision.retrieval_used
             answer_context_used = (
-                best.mode == "grounded" and len(best.contexts) > 0
+                best.mode in ("grounded", "hybrid") and len(best.contexts) > 0
             )
+            retrieval_mode = RetrievalMode(
+                getattr(best.decision, "retrieval_mode", "vector")
+            )
+            graph_trace = self._build_graph_trace(best.graph_result)
             trace = RouteTrace(
                 route=best.decision.route,
                 reason=best.decision.reason,
@@ -199,6 +280,10 @@ class RAGPipeline:
                 retrieval_probe_used=retrieval_probe_used,
                 answer_context_used=answer_context_used,
                 generation_mode=best.mode,
+                retrieval_mode=retrieval_mode,
+                graph_used=graph_trace is not None and (
+                    bool(graph_trace.matched_entities) or bool(graph_trace.graph_chunks)
+                ),
                 latency_ms=round(latency_ms, 2),
                 top_score=best.decision.top_score,
                 retrieved=best.contexts,
@@ -206,6 +291,7 @@ class RAGPipeline:
                 retry=retry_trace,
                 generation_error=best.generation_error,
                 generation=best.generation,
+                graph=graph_trace,
             )
 
         return AskResponse(
@@ -289,9 +375,10 @@ class RAGPipeline:
         # not here — we only handle the abstract failure type.
         generation_error: Optional[str] = None
         generation: Optional[GenerationTrace] = None
+        graph_result: Optional[GraphSearchResult] = None
         try:
             if decision.route is Route.RAG_ANSWER:
-                answer, contexts, mode, generation = self._handle_rag(
+                answer, contexts, mode, generation, graph_result = self._handle_rag(
                     params.query, decision, params.top_k
                 )
             elif decision.route is Route.NEEDS_CLARIFICATION:
@@ -327,6 +414,7 @@ class RAGPipeline:
             evaluation=evaluation,
             generation_error=generation_error,
             generation=generation,
+            graph_result=graph_result,
         )
 
     def _complete(
@@ -358,14 +446,102 @@ class RAGPipeline:
         )
 
     def _handle_rag(self, query, decision: RouteDecision, top_k):
-        """Build grounded context (reusing probe hits when present) and generate."""
+        """Build grounded context (reusing probe hits when present) and generate.
+
+        Returns ``(answer, contexts, mode, generation, graph_result)``. When the
+        router selected hybrid retrieval *and* a graph retriever is wired, this
+        fuses FAISS vector context with knowledge-graph context; otherwise it is
+        the historical vector-only grounded path (graph_result is None).
+        """
         # Reuse the router's probe hits if it already retrieved; otherwise (e.g.
         # a forced RAG route) retrieve now.
         hits = decision.hits if decision.hits else self.engine.search(query, top_k=top_k)
         contexts = _hits_to_contexts(hits)
-        prompt = build_grounded_prompt(query, contexts)
+
+        use_hybrid = (
+            self.graph_retriever is not None
+            and decision.retrieval_mode == "hybrid"
+        )
+        if not use_hybrid:
+            prompt = build_grounded_prompt(query, contexts)
+            answer, generation = self._complete(prompt, system=_GROUNDED_SYSTEM)
+            return answer, contexts, "grounded", generation, None
+
+        # --- Hybrid: vector + graph (Module 10) ---------------------------
+        graph_result = self.graph_retriever.retrieve(query)
+        if self.graph_metrics is not None:
+            self.graph_metrics.record_traversal(
+                self.graph_retriever.last_latency_ms, hybrid=True
+            )
+
+        prompt = build_hybrid_prompt(query, contexts, graph_result)
         answer, generation = self._complete(prompt, system=_GROUNDED_SYSTEM)
-        return answer, contexts, "grounded", generation
+
+        # Surface the graph's linked chunks as first-class grounding context so
+        # the evaluator credits groundedness and the trace shows what was used.
+        merged = list(contexts)
+        seen = {(c.source, c.chunk_index) for c in merged}
+        for ch in graph_result.graph_chunks:
+            key = (ch.source, ch.chunk_index)
+            if key not in seen:
+                seen.add(key)
+                merged.append(
+                    RetrievedContext(
+                        chunk_id=-1,
+                        text=ch.text,
+                        score=graph_result.graph_score,
+                        source=ch.source,
+                        chunk_index=ch.chunk_index,
+                    )
+                )
+        return answer, merged, "hybrid", generation, graph_result
+
+    def _build_graph_trace(
+        self, graph_result: Optional[GraphSearchResult]
+    ) -> Optional[GraphTrace]:
+        """Map an internal GraphSearchResult to the API GraphTrace (Module 10)."""
+        if graph_result is None:
+            return None
+        backend = getattr(
+            getattr(self.graph_retriever, "store", None), "backend", "memory"
+        )
+        latency = (
+            self.graph_retriever.last_latency_ms
+            if self.graph_retriever is not None
+            else 0.0
+        )
+        return GraphTrace(
+            graph_backend=backend,
+            matched_entities=[
+                GraphEntityModel(
+                    name=e.name, category=e.category.value, description=e.description
+                )
+                for e in graph_result.matched_entities
+            ],
+            traversed_entities=[
+                GraphEntityModel(
+                    name=e.name, category=e.category.value, description=e.description
+                )
+                for e in graph_result.traversed_entities
+            ],
+            traversed_relationships=[
+                GraphRelationshipModel(source=r.source, type=r.type, target=r.target)
+                for r in graph_result.traversed_relationships
+            ],
+            graph_chunks=[
+                RetrievedContext(
+                    chunk_id=-1,
+                    text=ch.text,
+                    score=graph_result.graph_score,
+                    source=ch.source,
+                    chunk_index=ch.chunk_index,
+                )
+                for ch in graph_result.graph_chunks
+            ],
+            graph_score=graph_result.graph_score,
+            hops=graph_result.hops,
+            graph_latency_ms=round(latency, 2),
+        )
 
     def _forced_decision(self, query, force_route: Route, top_k) -> RouteDecision:
         """Build a RouteDecision for a caller-forced route (skips heuristics)."""

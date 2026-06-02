@@ -47,7 +47,9 @@ outage. Aegis makes those failure modes **visible and self-correcting**:
                          │       → DIRECT / RAG / NEEDS_CLARIFICATION   │
                          │                                              │
                          │  2. Retrieval (RAG route only)               │
-                         │       chunk → embed (MiniLM) → FAISS top-k   │
+                         │       vector: chunk → embed (MiniLM) → FAISS │
+                         │       hybrid: FAISS ∪ Neo4j graph traversal  │
+                         │              (architecture-style queries)    │
                          │                                              │
                          │  3. Generation                               │
                          │       LLMProvider interface + FallbackChain  │
@@ -83,6 +85,7 @@ Two layers, cleanly separated:
 |---|---|
 | **Adaptive routing** | Classifies each query into `DIRECT_ANSWER`, `RAG_ANSWER`, or `NEEDS_CLARIFICATION` using structural heuristics + a single FAISS probe. |
 | **Grounded retrieval** | Word-window chunking → MiniLM embeddings → FAISS inner-product search, with provenance and scores per chunk. |
+| **Hybrid GraphRAG** | Relationship/architecture queries trigger a `hybrid` mode that fuses FAISS vector search with multi-hop **Neo4j knowledge-graph** traversal. Falls back to an in-memory graph store with zero dependencies. |
 | **Offline evaluation** | `DeterministicJudge` scores every answer on six dimensions with **no second LLM call** — free, fast, deterministic. |
 | **Self-healing retry** | When `overall_score < 0.60`, runs query-expansion / force-RAG / wider-k strategies and keeps the best-of-N. |
 | **Provider abstraction** | One `LLMProvider` interface; `mock`/`openai`/`anthropic`/`bedrock` swap via env var. SDKs imported lazily. |
@@ -164,6 +167,145 @@ A single `/ask` returns the answer plus a full decision trail:
 
 ---
 
+## Hybrid GraphRAG retrieval (Module 10)
+
+Vector search is great at *"find me the passage that says X."* It is bad at
+*"how do routing and retries interact?"* — because the answer is not in any
+single chunk; it lives in the **relationships between concepts**. Aegis adds a
+knowledge graph as a first-class retrieval strategy and **fuses** it with FAISS.
+
+### Why GraphRAG?
+
+- **Multi-hop reasoning.** "Trace the path of a RAG request end-to-end" needs to
+  walk `Router → Retrieval → Generation → Evaluation → RetryManager`. A vector
+  search returns the most *similar* chunk; a graph traversal returns the *connected*
+  ones.
+- **Structure over similarity.** Architecture, dependency, workflow, and
+  failure-path questions are about edges, not cosine distance.
+- **Explainability.** The graph trace shows exactly which entities and
+  relationships fed the answer — not a black-box similarity score.
+
+### Why Neo4j?
+
+- Native property graph with a mature, declarative traversal language (Cypher)
+  and real indexes/constraints — variable-length `[*1..3]` traversals are a
+  one-liner, not a recursive join.
+- It is the industry-standard graph database, so this mirrors how a real
+  platform team would ship GraphRAG.
+- **It is optional.** The `neo4j` driver is lazy-imported and Aegis ships an
+  **in-memory graph store** with the identical interface. The default backend is
+  `memory`, so the entire test suite and demo run with **zero graph
+  infrastructure**. Point `AEGIS_GRAPH_BACKEND=neo4j` at a live server and the
+  exact same pipeline persists to Neo4j; if that server is unreachable at
+  startup, Aegis logs a warning and **falls back to memory instead of crashing**.
+
+### Vector vs Graph vs Hybrid
+
+| Mode | How it gathers context | Best for | When Aegis uses it |
+|---|---|---|---|
+| **Vector** | FAISS top-k over MiniLM embeddings | "What is the refund window?" — fact lookup | Default for `RAG_ANSWER`. |
+| **Graph** | Entity match → multi-hop traversal → linked chunks | Pure relationship lookups | Available via the `GraphStore` directly. |
+| **Hybrid** | **Vector ∪ Graph**, merged into one grounded prompt | "How do routing and retries interact?" | Auto-selected when the router detects an architecture-style query. |
+
+The router flags a query as architecture-style on keywords like *relationship,
+depend, architecture, workflow, trace, interact, connect, pipeline, end-to-end,
+failure path, component*. Direct factual questions stay `DIRECT_ANSWER`; ordinary
+document lookups stay vector `RAG_ANSWER`. Hybrid never *replaces* FAISS — it
+**adds** graph context to it.
+
+### How the graph is built
+
+During ingestion, every document runs **two** pipelines in parallel:
+
+```
+text ─┬─► chunk → embed (MiniLM) → FAISS            (vector index, unchanged)
+      └─► chunk → extract entities → nodes+edges → graph store + [:MENTIONS] chunk links
+```
+
+Entities are typed into nine categories — `Component, Route, Provider, Retrieval,
+Evaluation, Retry, Metric, Dashboard, Document` — by a deterministic,
+alias-based `EntityExtractor`. That extractor sits behind an interface, so an
+LLM-based extractor can replace it later **without touching the store, retriever,
+or pipeline**. The Aegis architecture ontology itself is seeded as graph data so
+the system can answer questions about its own design out of the box.
+
+### Example Cypher
+
+The Neo4j store creates a uniqueness constraint and indexes, then `MERGE`s nodes,
+relationships, and chunk links. A traversal looks like:
+
+```cypher
+// Multi-hop neighbourhood around the query's anchor entities (max 2 hops),
+// then the chunks that mention any traversed entity.
+MATCH (a:Entity) WHERE a.name IN $anchors
+MATCH path = (a)-[*1..2]-(n:Entity)
+WITH collect(DISTINCT n) + collect(DISTINCT a) AS ents, relationships(path) AS rels
+UNWIND ents AS e
+OPTIONAL MATCH (e)<-[:MENTIONS]-(c:Chunk)
+RETURN e, rels, c
+```
+
+### Example Graph Trace
+
+A hybrid `/ask` adds a `graph` block (and `retrieval_mode: "hybrid"`) to the trace:
+
+```jsonc
+{
+  "query": "How do routing and retries interact?",
+  "route": "RAG_ANSWER",
+  "trace": {
+    "retrieval_mode": "hybrid",
+    "graph_used": true,
+    "generation_mode": "hybrid",
+    "graph": {
+      "graph_backend": "neo4j",          // or "memory" on the fallback path
+      "matched_entities": [
+        { "name": "QueryRouter", "category": "Component", "description": "..." },
+        { "name": "RetryManager", "category": "Retry", "description": "..." }
+      ],
+      "traversed_entities": [ /* 6 nodes reached within 2 hops */ ],
+      "traversed_relationships": [
+        { "source": "QueryRouter", "type": "ROUTES_TO", "target": "RAGPipeline" },
+        { "source": "RetryManager", "type": "RETRIES", "target": "RAGPipeline" }
+        /* … 9 total … */
+      ],
+      "graph_chunks": [ /* chunks linked to the traversed entities */ ],
+      "graph_score": 0.84,
+      "hops": 2,
+      "graph_latency_ms": 1.7
+    }
+  }
+}
+```
+
+The dashboard renders this as a **Graph Trace** panel (colour-coded entity chips,
+the relationship edges, linked chunks, and headline stats), and the *What
+happened?* summary explains in plain English: *"Aegis selected hybrid retrieval
+because this was a relationship-heavy query. It combined FAISS vector search with
+neo4j graph traversal across 6 entities and 9 relationships before generating the
+answer."*
+
+### Running with Neo4j (optional)
+
+```bash
+docker run -d --name aegis-neo4j \
+  -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/aegispass \
+  neo4j:5
+
+pip install neo4j                          # lazy-imported; only needed for this backend
+export AEGIS_GRAPH_BACKEND=neo4j
+export NEO4J_URI=bolt://localhost:7687
+export NEO4J_USERNAME=neo4j
+export NEO4J_PASSWORD=aegispass
+# Browse the graph at http://localhost:7474 after ingesting docs.
+```
+
+Omit all of the above and Aegis runs the in-memory graph store — same behaviour,
+no infrastructure.
+
+---
+
 ## Provider modes
 
 Selected entirely by environment variable — no code changes:
@@ -192,10 +334,14 @@ make test           # runs every backend suite with the offline mock provider
 make build          # production build of the dashboard (verifies it compiles)
 ```
 
-The backend ships **11 standalone test suites** (routing, RAG, judge, retry,
+The backend ships **16 standalone test suites** (routing, RAG, judge, retry,
 provider fallback, Bedrock/cost/metrics, ops, frontend contract, trace
-semantics, and the semantic mock). Each runs offline with no API keys and can
-also be executed directly:
+semantics, the semantic mock, and five Module 10 GraphRAG suites — graph store,
+Neo4j integration + fallback, graph retrieval, hybrid RAG, and the dashboard
+contract). The GraphRAG suites run entirely offline against the in-memory graph
+store; the Neo4j suite exercises a live round-trip only if one is reachable and
+skips otherwise. Each runs offline with no API keys and can also be executed
+directly:
 
 ```bash
 cd backend && HF_HOME=$PWD/.hf_cache ./venv/bin/python tests/test_module4.py
@@ -228,7 +374,8 @@ aegis-llm-reliability-mesh/
 ├── data/                  # sample documents for `make seed`
 ├── backend/               # FastAPI service (see backend/README.md)
 │   ├── app/               # routers, services, schemas, config
+│   │   └── services/graph/  # GraphStore, Neo4j + in-memory backends, retriever
 │   ├── scripts/           # run.sh, seed.sh, *_examples.sh
-│   └── tests/             # 11 offline test suites
+│   └── tests/             # 16 offline test suites (incl. 5 GraphRAG)
 └── frontend/              # Next.js 14 observability dashboard
 ```

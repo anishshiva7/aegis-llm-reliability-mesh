@@ -46,6 +46,16 @@ function buildSummary(data: AskResponse): { sentences: string[]; tone: "good" | 
     );
   }
 
+  // 1.5) Hybrid GraphRAG activity (Module 10).
+  if (trace.retrieval_mode === "hybrid" && trace.graph) {
+    const g = trace.graph;
+    const entCount = g.traversed_entities?.length ?? 0;
+    const relCount = g.traversed_relationships?.length ?? 0;
+    sentences.push(
+      `Aegis selected hybrid retrieval because this was a relationship-heavy query. It combined FAISS vector search with ${g.graph_backend} graph traversal across ${entCount} entit${entCount === 1 ? "y" : "ies"} and ${relCount} relationship${relCount === 1 ? "" : "s"} (graph score ${fixed(g.graph_score, 2)}) before generating the answer.`,
+    );
+  }
+
   // 2) Who served it.
   if (provider) {
     const how = gen?.fallback_used
